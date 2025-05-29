@@ -2,75 +2,68 @@ const express = require('express');
 const multer = require('multer');
 const path = require('path');
 const session = require('express-session');
-const fs = require('fs');
+const cloudinary = require('cloudinary').v2;
+const { CloudinaryStorage } = require('multer-storage-cloudinary');
 
 const app = express();
-const PORT = 3100;
+const PORT = process.env.PORT || 3000;
 
-// Simple user store (for demo)
-const users = [{ username: 'user1', password: 'pass1' }];
-
-// Session setup
-app.use(session({
-  secret: 'secret-key',
-  resave: false,
-  saveUninitialized: true,
-}));
-
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
-app.use(express.static('public'));
-
-// Serve images statically
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
-
-// Multer setup
-const storage = multer.diskStorage({
-  destination: function (req, file, cb) {
-    cb(null, 'uploads/');
-  },
-  filename: function (req, file, cb) {
-    cb(null, Date.now() + '-' + file.originalname);
-  }
+// Cloudinary Config
+cloudinary.config({
+  cloud_name: 'dtgyqdz3n',
+  api_key: '883451444335193',
+  api_secret: 'HCXRIHOWyNbWVoxTvP-2Gy7OZr0'
 });
+
+// Use Cloudinary Storage for Multer
+const storage = new CloudinaryStorage({
+  cloudinary: cloudinary,
+  params: {
+    folder: 'uploads',
+    allowed_formats: ['jpg', 'jpeg', 'png'],
+    public_id: (req, file) => file.originalname.split('.')[0],
+  },
+});
+
 const upload = multer({ storage });
 
-// Login route
+app.use(express.static('public'));
+app.use(express.json());
+app.use(session({
+  secret: 'secret',
+  resave: false,
+  saveUninitialized: true
+}));
+
+const users = [
+  { username: 'user', password: 'admin' }
+];
+
+const uploadedImages = []; // Will store Cloudinary URLs
+
 app.post('/login', (req, res) => {
   const { username, password } = req.body;
   const user = users.find(u => u.username === username && u.password === password);
   if (user) {
-    req.session.user = username;
+    req.session.user = user;
     res.json({ success: true });
   } else {
-    res.json({ success: false, message: 'Invalid credentials' });
+    res.status(401).json({ success: false });
   }
 });
 
-// Auth middleware
-function authMiddleware(req, res, next) {
-  if (req.session.user) {
-    next();
-  } else {
-    res.status(401).json({ message: 'Not logged in' });
-  }
-}
-
-// Upload route
-app.post('/upload', authMiddleware, upload.single('image'), (req, res) => {
-  res.json({ success: true, filename: req.file.filename });
+app.post('/upload', upload.single('image'), (req, res) => {
+  if (!req.session.user) return res.status(401).send('Unauthorized');
+  const imageUrl = req.file.path; // Cloudinary hosted image URL
+  uploadedImages.push(imageUrl);
+  res.json({ success: true, imageUrl });
 });
 
-// Get list of images
-app.get('/images', authMiddleware, (req, res) => {
-  fs.readdir('uploads/', (err, files) => {
-    if (err) return res.status(500).json({ message: 'Error reading files' });
-    res.json({ images: files });
-  });
+app.get('/images', (req, res) => {
+  if (!req.session.user) return res.status(401).send('Unauthorized');
+  res.json({ images: uploadedImages });
 });
 
 app.listen(PORT, () => {
-  console.log(`Server running at http://localhost:${PORT}`);
+  console.log(`Server running on port ${PORT}`);
 });
-
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
