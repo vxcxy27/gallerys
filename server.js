@@ -1,74 +1,124 @@
-const express = require('express');
-const multer = require('multer');
-const session = require('express-session');
-const cloudinary = require('cloudinary').v2;
-const { CloudinaryStorage } = require('multer-storage-cloudinary');
-const path = require('path');
+import express from 'express';
+import cors from 'cors';
+import multer from 'multer';
+import dotenv from 'dotenv';
+import { createClient } from '@supabase/supabase-js';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+dotenv.config();
 
 const app = express();
-const PORT = process.env.PORT || 3000;
-
-// Configure Cloudinary
-cloudinary.config({
-  cloud_name: 'dtgyqdz3n',
-  api_key: '883451444335193',
-  api_secret: 'HCXRIHOWyNbWVoxTvP-2Gy7OZr0'
-});
-
-// Multer storage using Cloudinary
-const storage = new CloudinaryStorage({
-  cloudinary: cloudinary,
-  params: {
-    folder: 'uploads',
-    allowed_formats: ['jpg', 'jpeg', 'png'],
-    public_id: (req, file) => path.parse(file.originalname).name,
-  },
-});
-
-const upload = multer({ storage });
+const port = process.env.PORT || 5000;
 
 // Middleware
-app.use(express.static('public')); // serve static files if you have any
+app.use(cors());
 app.use(express.json());
-app.use(session({
-  secret: 'secret',
-  resave: false,
-  saveUninitialized: true
-}));
 
-// In-memory users and image storage (for demo)
-const users = [
-  { username: 'user', password: 'admin' }
-];
-const uploadedImages = []; // store uploaded image URLs
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+app.use(express.static(path.join(__dirname, 'public')));
 
-// Routes
-app.post('/login', (req, res) => {
-  const { username, password } = req.body;
-  const user = users.find(u => u.username === username && u.password === password);
-  if (user) {
-    req.session.user = user;
-    res.json({ success: true });
-  } else {
-    res.status(401).json({ success: false });
+// Configure Multer with limits and file filter
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB limit
+  fileFilter: (req, file, cb) => {
+    if (file.mimetype.startsWith('image/')) {
+      cb(null, true);
+    } else {
+      cb(new Error('Only image files are allowed'), false);
+    }
   }
 });
 
-app.post('/upload', upload.single('image'), (req, res) => {
-  if (!req.session.user) return res.status(401).send('Unauthorized');
+// Supabase Client
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
-  const imageUrl = req.file.path; // Cloudinary URL
-  uploadedImages.push(imageUrl);
+// Upload route with improved filename handling
+app.post('/upload', upload.single('image'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'No file uploaded' });
+    }
 
-  res.json({ success: true, imageUrl });
+    // Improved filename sanitization
+    const originalName = req.file.originalname;
+    const fileExt = path.extname(originalName);
+    const baseName = path.basename(originalName, fileExt)
+      .replace(/\s+/g, '_')
+      .replace(/[^a-zA-Z0-9_-]/g, '')
+      .substring(0, 50); // Limit base name length
+
+    const fileName = `${Date.now()}_${baseName}${fileExt}`;
+
+    const { error } = await supabase.storage
+      .from('images')
+      .upload(fileName, req.file.buffer, {
+        contentType: req.file.mimetype,
+        upsert: false
+      });
+
+    if (error) {
+      console.error('Upload error:', error);
+      return res.status(500).json({ error: error.message });
+    }
+
+    const { publicURL } = supabase.storage
+      .from('images')
+      .getPublicUrl(fileName);
+
+    res.json({
+      message: 'Upload successful',
+      url: publicURL,
+      name: fileName,
+      originalName: originalName
+    });
+
+  } catch (err) {
+    console.error('Server error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
-app.get('/images', (req, res) => {
-  if (!req.session.user) return res.status(401).send('Unauthorized');
+// List images with better data handling
+app.get('/images', async (req, res) => {
+  try {
+    const { data, error } = await supabase.storage.from('images').list();
 
-  res.json({ images: uploadedImages });
+    if (error) {
+      console.error('List error:', error);
+      return res.status(500).json({ error: error.message });
+    }
+
+    const images = data.map(file => {
+      const { publicURL } = supabase.storage.from('images').getPublicUrl(file.name);
+      
+      // Extract original name from stored filename
+      const originalName = file.name.split('_').slice(1).join('_');
+      
+      return {
+        name: file.name,
+        url: publicURL,
+        originalName: originalName
+      };
+    });
+
+    res.json(images);
+  } catch (err) {
+    console.error('Server error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+// Error handling middleware
+app.use((err, req, res, next) => {
+  console.error(err.stack);
+  res.status(500).json({ error: 'Something went wrong!' });
+});
+
+app.listen(port, () => {
+  console.log(`✅ Server running at http://localhost:${port}`);
 });
